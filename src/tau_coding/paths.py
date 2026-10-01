@@ -25,6 +25,11 @@ class TauPaths:
         return self.home / "sessions"
 
     @property
+    def router_config_path(self) -> Path:
+        """Return the optional dynamic model router configuration path."""
+        return self.home / "router.json"
+
+    @property
     def logs_dir(self) -> Path:
         """Return Tau's user-level diagnostic log directory."""
         return self.home / "logs"
