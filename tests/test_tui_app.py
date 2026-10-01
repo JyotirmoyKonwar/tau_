@@ -6632,6 +6632,32 @@ def test_tui_model_picker_guides_setup_when_no_provider_is_usable() -> None:
 
 
 @pytest.mark.anyio
+async def test_tui_model_switch_uses_session_selection() -> None:
+    class SelectingSession(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.selections: list[ModelChoice] = []
+
+        async def select_provider_model(self, choice: ModelChoice) -> None:
+            self.selections.append(choice)
+            self.provider_name = choice.provider_name
+            self.model = choice.model
+
+        def set_model_choice(self, choice: ModelChoice) -> None:
+            raise AssertionError(f"Legacy model switch used: {choice}")
+
+    session = SelectingSession()
+    app = TauTuiApp(session)
+    choice = ModelChoice(provider_name="local", model="local-model")
+
+    async with app.run_test():
+        await app._switch_model(choice)
+
+    assert session.selections == [choice]
+    assert (session.provider_name, session.model) == ("local", "local-model")
+
+
+@pytest.mark.anyio
 async def test_tui_app_deduplicates_active_notifications() -> None:
     app = TauTuiApp(FakeSession())
 

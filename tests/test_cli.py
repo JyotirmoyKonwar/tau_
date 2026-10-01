@@ -1134,6 +1134,27 @@ def test_print_mode_passes_session_id_for_resume(monkeypatch: pytest.MonkeyPatch
     assert calls == [("follow up", "session-123")]
 
 
+def test_print_mode_forwards_manual_provider_model_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    selections: list[tuple[str | None, str | None]] = []
+
+    async def fake_run_openai_print_mode(*args: object, **kwargs: object) -> bool:
+        provider = args[4]
+        model = args[1]
+        del kwargs
+        assert provider is None or isinstance(provider, str)
+        assert model is None or isinstance(model, str)
+        selections.append((provider, model))
+        return True
+
+    monkeypatch.setattr(cli, "_startup_update_notice", lambda: None)
+    monkeypatch.setattr(cli, "run_openai_print_mode", fake_run_openai_print_mode)
+
+    result = CliRunner().invoke(app, ["--print", "--provider", "local", "--model", "qwen", "hello"])
+
+    assert result.exit_code == 0
+    assert selections == [("local", "qwen")]
+
+
 def test_print_mode_rejects_session_and_new_session() -> None:
     result = CliRunner().invoke(
         app, ["--print", "--session", "session-123", "--new-session", "follow up"]

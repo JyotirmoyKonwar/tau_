@@ -6,6 +6,8 @@ dist/
 wheels/
 *.egg-info
 .mypy_cache/
+.pytest_cache/
+.ruff_cache/
 
 # Virtual environments
 .venv
@@ -23,5 +25,7 @@ website/.hugo_build.lock
 
 # Agent tools
 .firecrawl/
+.serena/
+
 # Local scratch tooling
 scripts/analyze_session.py

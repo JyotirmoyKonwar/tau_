@@ -4943,6 +4943,65 @@ async def test_session_switches_configured_provider(
 
 
 @pytest.mark.anyio
+async def test_select_provider_model_records_cross_provider_choice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    isolate_home(monkeypatch, tmp_path)
+    storage = JsonlSessionStorage(tmp_path / "selected-model.jsonl")
+    settings = ProviderSettings(
+        default_provider="openai",
+        providers=(
+            OpenAICompatibleProviderConfig(name="openai", models=("gpt-5",), default_model="gpt-5"),
+            OpenAICompatibleProviderConfig(name="local", models=("qwen",), default_model="qwen"),
+        ),
+    )
+    created: list[tuple[str, str | None]] = []
+
+    def create_provider(
+        provider_config: OpenAICompatibleProviderConfig,
+        *,
+        credential_store: FileCredentialStore | None = None,
+        model: str | None = None,
+        thinking_level: str | None = None,
+    ) -> SwitchableFakeProvider:
+        del credential_store, thinking_level
+        created.append((provider_config.name, model))
+        return SwitchableFakeProvider(provider_config)
+
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="gpt-5",
+            system="You are Tau.",
+            storage=storage,
+            cwd=tmp_path,
+            provider_name="openai",
+            provider_settings=settings,
+        )
+    )
+
+    choice = ModelChoice(provider_name="local", model="qwen")
+    result = await session.select_provider_model(choice)
+    entries = await storage.read_all()
+
+    assert result.choice == choice
+    assert result.changed is True
+    assert (session.provider_name, session.model) == ("local", "qwen")
+    assert created == [("local", "qwen")]
+    model_changes = [entry for entry in entries if isinstance(entry, ModelChangeEntry)]
+    assert (model_changes[-1].provider, model_changes[-1].model) == ("local", "qwen")
+    assert entries[-1].type == "leaf"
+    assert load_provider_settings().default_provider == "local"
+
+    repeated = await session.select_provider_model(choice)
+    assert repeated.changed is False
+    assert created == [("local", "qwen")]
+    assert await storage.read_all() == entries
+    await session.aclose()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("operation", ["new", "resume", "replacement"])
 async def test_session_adoption_transfers_all_runtime_provider_ownership(
     monkeypatch: pytest.MonkeyPatch,
