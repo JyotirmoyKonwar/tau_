@@ -1430,8 +1430,8 @@ class CodingSession:
         message = self._harness.pop_latest_steering()
         return None if message is None else message_text(message)
 
-    def set_model(self, model: str) -> None:
-        """Switch the active model for future turns and make it the default."""
+    def set_model(self, model: str, *, persist_default: bool = True) -> None:
+        """Switch the active model, optionally saving it as the manual default."""
         provider = self._active_provider_config()
         if provider is not None:
             validate_provider_model(provider, model)
@@ -1441,7 +1441,8 @@ class CodingSession:
         self._sync_thinking_level_to_active_model()
         self._refresh_runtime_provider()
         self._sync_image_support()
-        self._persist_default_model_choice()
+        if persist_default:
+            self._persist_default_model_choice()
         if self._config.session_id is not None and self._config.session_manager is not None:
             self._config.session_manager.touch_session(
                 self._config.session_id,
@@ -1644,12 +1645,14 @@ class CodingSession:
         self._activate_runtime_provider(provider, provider_config)
         return normalized or "automatic (will pin after the next successful response)"
 
-    def set_model_choice(self, choice: ModelChoice) -> None:
-        """Switch provider/model as one operation."""
+    def set_model_choice(self, choice: ModelChoice, *, persist_default: bool = True) -> None:
+        """Switch provider/model as one operation, optionally saving the default."""
         if choice.provider_name == self.provider_name:
-            self.set_model(choice.model)
+            self.set_model(choice.model, persist_default=persist_default)
             return
-        self._set_provider_model(choice.provider_name, choice.model)
+        self._set_provider_model(
+            choice.provider_name, choice.model, persist_default=persist_default
+        )
 
     def is_scoped_model(self, choice: ModelChoice) -> bool:
         """Return whether a provider/model pair is in the scoped model list."""

@@ -349,6 +349,42 @@ When compiling history for Anthropic, Tau also omits opaque reasoning signatures
 created by other APIs. This lets a session continue after tools have run without
 exposing users to provider validation errors or rewriting the saved JSONL history.
 
+### Automatic print-mode routing
+
+Tau can choose among three configured models before a print-mode turn starts.
+Create `~/.tau/router.json` with provider/model IDs already available in Tau:
+
+```json
+{
+  "schema_version": 1,
+  "default_policy": "balanced",
+  "tiers": {
+    "small": {"provider": "local", "model": "small-model"},
+    "medium": {"provider": "local", "model": "medium-model"},
+    "strong": {"provider": "cloud", "model": "strong-model"}
+  }
+}
+```
+
+Replace the example IDs with three distinct configured choices. Each tier can
+optionally set `context_window`, `input_cost`, and `output_cost`; the cost rates
+are estimated USD per million tokens. Tau fills missing metadata from the
+provider catalog when known. Then run:
+
+```bash
+tau --print --model auto "Explain this function"
+tau --print --model auto:quality "Debug the worker deadlock"
+```
+
+`auto` uses the configured default policy. `economy`, `balanced`, and `quality`
+choose different success/cost/latency tradeoffs using fixed baseline estimates.
+The selected tier, provider/model, and reason appear on stderr. The heuristic
+engine is the only available router engine in this phase; use
+`--router-engine heuristic` to select it explicitly. Routing runs once for each
+new print-mode prompt, including a resumed session's next prompt, and does not
+change your saved manual model default. Interactive TUI routing is planned for the next
+phase.
+
 ### Claude Opus 5
 
 Tau supports Anthropic's `claude-opus-5` through the direct `anthropic`

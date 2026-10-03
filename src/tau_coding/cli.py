@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from functools import partial
 from os import environ
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import anyio
 import typer
@@ -50,10 +50,21 @@ from tau_coding.provider_config import (
 from tau_coding.provider_runtime import ClosableModelProvider, create_model_provider
 from tau_coding.rendering import PrintOutputMode, create_event_renderer
 from tau_coding.resources import TauResourcePaths
+from tau_coding.router_config import (
+    RouterConfig,
+    load_router_config,
+    resolve_router_candidates,
+)
+from tau_coding.router_config import (
+    RouterPolicy as RouterMode,
+)
+from tau_coding.router_features import analyze_turn, filter_router_candidates
+from tau_coding.router_policy import HeuristicPolicy, RoutingError, RoutingPolicy
 from tau_coding.rpc import RpcServer
 from tau_coding.session import (
     CodingSession,
     CodingSessionConfig,
+    ModelChoice,
     TerminalCommandResult,
     jsonl_session_storage,
     parse_terminal_command,
@@ -217,7 +228,15 @@ def main(
     ] = None,
     model: Annotated[
         str | None,
-        typer.Option("--model", "-m", help="Model name to request from the provider."),
+        typer.Option(
+            "--model",
+            "-m",
+            help="Model name, or auto[:economy|balanced|quality] in print mode.",
+        ),
+    ] = None,
+    router_engine: Annotated[
+        str | None,
+        typer.Option("--router-engine", help="Auto router engine (heuristic)."),
     ] = None,
     thinking: Annotated[
         str | None,
@@ -430,6 +449,21 @@ def main(
     rpc_requested = mode is PrintOutputMode.rpc
     print_requested = print_mode or (mode is not None and not rpc_requested)
     effective_output = mode or PrintOutputMode.text
+    auto_model = model == "auto" or (model is not None and model.startswith("auto:"))
+    if (
+        model is not None
+        and model.startswith("auto:")
+        and model[5:] not in {"economy", "balanced", "quality"}
+    ):
+        raise typer.BadParameter("--model auto mode must be economy, balanced, or quality")
+    if auto_model and provider is not None:
+        raise typer.BadParameter("--provider cannot be combined with --model auto")
+    if auto_model and (not print_requested or rpc_requested):
+        raise typer.BadParameter("--model auto is currently supported in print mode only")
+    if router_engine is not None and not auto_model:
+        raise typer.BadParameter("--router-engine requires --model auto")
+    if router_engine not in (None, "heuristic"):
+        raise typer.BadParameter("Only the heuristic router engine is available in Phase 5")
 
     if session_id is not None:
         if not print_requested:
@@ -604,11 +638,21 @@ def main(
             custom_system_prompt,
             resolved_append_system_prompt,
         )
-        print_runner = (
-            partial(run_openai_print_mode, thinking_level_override=thinking_level_override)
-            if thinking_level_override is not None
-            else run_openai_print_mode
-        )
+        print_runner: Callable[..., Awaitable[bool]]
+        if thinking_level_override is not None and router_engine is not None:
+            print_runner = partial(
+                run_openai_print_mode,
+                thinking_level_override=thinking_level_override,
+                router_engine=router_engine,
+            )
+        elif thinking_level_override is not None:
+            print_runner = partial(
+                run_openai_print_mode, thinking_level_override=thinking_level_override
+            )
+        elif router_engine is not None:
+            print_runner = partial(run_openai_print_mode, router_engine=router_engine)
+        else:
+            print_runner = run_openai_print_mode
         if session is not None:
             ok = anyio.run(print_runner, *print_args, trust_override, session)
         else:
@@ -1028,6 +1072,13 @@ async def run_openai_rpc_mode(
         await provider.aclose()
 
 
+def _auto_router_mode(model: str) -> RouterMode:
+    mode = model.removeprefix("auto:")
+    if not model.startswith("auto:") or mode not in {"economy", "balanced", "quality"}:
+        raise ValueError("--model auto mode must be economy, balanced, or quality")
+    return cast(RouterMode, mode)
+
+
 async def run_openai_print_mode(
     prompt: str,
     model: str | None,
@@ -1045,8 +1096,19 @@ async def run_openai_print_mode(
     resume_session_id: str | None = None,
     *,
     thinking_level_override: ThinkingLevel | None = None,
+    router_engine: str | None = None,
 ) -> bool:
     """Run a new or resumed print-mode turn using the configured provider."""
+    router_config: RouterConfig | None = None
+    router_mode: RouterMode | None = None
+    if model == "auto" or (model is not None and model.startswith("auto:")):
+        if provider_name is not None:
+            raise ValueError("--provider cannot be combined with --model auto")
+        if router_engine not in (None, "heuristic"):
+            raise ValueError("Only the heuristic router engine is available in Phase 5")
+        router_config = load_router_config()
+        router_mode = router_config.default_policy if model == "auto" else _auto_router_mode(model)
+        model = None
     settings = load_provider_settings()
     shell_settings = load_shell_settings()
     manager = session_manager or SessionManager()
@@ -1167,6 +1229,8 @@ async def run_openai_print_mode(
             startup_model_override=False,
             inference_provider_mode=runtime_inference_mode,
             thinking_level_override=thinking_level_override,
+            router_config=router_config,
+            router_mode=router_mode,
         )
     finally:
         # This remains the ownership path for the compatibility provider
@@ -1269,6 +1333,9 @@ async def run_print_mode(
     trust_default: TrustDefault = "ask",
     startup_model_override: bool = False,
     thinking_level_override: ThinkingLevel | None = None,
+    router_config: RouterConfig | None = None,
+    router_mode: RouterMode | None = None,
+    routing_policy: RoutingPolicy | None = None,
 ) -> bool:
     """Run one non-interactive prompt and print streamed events.
 
@@ -1360,6 +1427,41 @@ async def run_print_mode(
             if message:
                 typer.echo(message)
             return True
+        if router_config is not None:
+            if provider_settings is None:
+                raise RoutingError("Auto routing requires provider settings")
+            available = {
+                (choice.provider_name, choice.model) for choice in session.available_model_choices
+            }
+            candidates = resolve_router_candidates(
+                router_config, provider_settings, available_choices=available
+            )
+            features = analyze_turn(
+                prompt,
+                system=session.system_prompt,
+                messages=session.messages,
+                tools=session.tools,
+            )
+            filtered = filter_router_candidates(features, candidates, provider_settings)
+            if not filtered.eligible:
+                reasons = ", ".join(
+                    f"{tier}: {reason}" for tier, reason in filtered.rejected.items()
+                )
+                raise RoutingError(f"No eligible router candidates ({reasons})")
+            decision = (routing_policy or HeuristicPolicy()).select(
+                features,
+                filtered.eligible,
+                mode=router_mode or router_config.default_policy,
+                stats={},
+            )
+            session.set_model_choice(
+                ModelChoice(decision.provider, decision.model), persist_default=False
+            )
+            typer.echo(
+                f"Router: {decision.tier} ({decision.provider}/{decision.model}); "
+                f"{decision.reason}",
+                err=True,
+            )
         async for event in session.prompt(prompt):
             renderer.render(event)
         return renderer.finish()

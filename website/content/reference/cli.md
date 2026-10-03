@@ -44,7 +44,8 @@ features and fixes.
 | Flag | Description |
 | --- | --- |
 | `-p, --print` | Run the positional prompt in non-interactive print mode |
-| `-m, --model TEXT` | Model to request from the provider |
+| `-m, --model TEXT` | Model to request, or `auto[:economy\|balanced\|quality]` in print mode |
+| `--router-engine TEXT` | Auto router engine; `heuristic` is available now |
 | `--provider TEXT` | Configured provider name to use |
 | `-t, --thinking LEVEL` | Initial [thinking level]({{< relref "../guides/context.md#thinking-modes" >}}) for this run (`off`…`max`); overrides remembered defaults without persisting, errors if the model doesn't support it |
 | `--cwd PATH` | Working directory for the built-in tools |
@@ -109,6 +110,21 @@ resources. See
 for paths, precedence, diagnostics, and the project-resource security warning.
 
 ### Resume in print mode
+
+For deterministic model routing, configure three candidates in
+`~/.tau/router.json`, then pass `--model auto` (or an explicit mode):
+
+```bash
+tau --print --model auto "Explain this function"
+tau --print --model auto:economy "Add tests for this parser"
+```
+
+`auto` uses the file's `default_policy`; the explicit suffix overrides it for
+one invocation. Tau reports the selected tier and model on stderr before the
+agent response. Routing currently supports print mode and the heuristic engine.
+It does not change the saved manual model default. See
+[Providers & models]({{< relref "../guides/providers-and-models.md#automatic-print-mode-routing" >}})
+for the configuration shape.
 
 Use `--print` and `--session` together to append a non-interactive follow-up to
 an existing conversation. Tau loads the session's saved working directory,
